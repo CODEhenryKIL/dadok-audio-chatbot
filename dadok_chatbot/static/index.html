@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>다독 · 육아의 하루를 함께</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#203c35;background:#f5f7f3}*{box-sizing:border-box}body{margin:0}main{max-width:840px;margin:auto;padding:32px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid #dbe4db;padding-bottom:20px}h1{font-size:26px;margin:0}p{line-height:1.7}.sub{color:#66786c;font-size:14px}button{cursor:pointer;border:0;border-radius:12px;padding:12px 18px;background:#245744;color:white;font:inherit}button:disabled{opacity:.5}#new{background:#e4ece2;color:#245744}#conversation{min-height:48vh;padding:24px 0}.bubble{max-width:90%;padding:16px 20px;border-radius:18px;background:white;box-shadow:0 2px 8px #21392c08;margin-bottom:16px;white-space:pre-wrap;line-height:1.8}.user{margin-left:auto;background:#dfecdf}.meta{font-size:12px;color:#637467;margin-top:8px}form{display:flex;gap:10px;position:sticky;bottom:16px;background:#f5f7f3;padding:12px 0}textarea{resize:vertical;min-height:64px;max-height:200px;flex:1;border:1px solid #cbd9cc;border-radius:14px;padding:16px;font:inherit}#status{font-size:13px;color:#697b70}details{margin:12px 0;font-size:13px}input{padding:8px;border:1px solid #cbd9cc;border-radius:8px}a{color:inherit}
+</style>
+<link rel="stylesheet" href="/voice-assets/voice.css">
+<main><header><div><h1>다독</h1><div class="sub">육아의 하루를 함께 정리해요</div></div><button id="new" type="button">새 대화</button></header>
+<p>육아 기록을 돌아보거나, 궁금한 육아 정보를 물어보세요.</p>
+<div id="status" role="status">연결 확인 중…</div>
+<details><summary>아이 선택</summary><label>아이 ID <input id="child" value="demo-child" maxlength="100"></label></details>
+<section class="voice-panel" aria-label="음성 대화">
+<label class="voice-choice" for="voice-choice">답변 목소리 <select id="voice-choice" disabled><option value="">목소리 불러오는 중…</option></select></label>
+<div class="voice-controls"><button id="voice-start" type="button">음성 대화 시작</button><button id="voice-stop" type="button" disabled>음성 대화 중지</button><span id="voice-status" role="status" aria-live="polite">음성 설정 확인 중…</span></div>
+<p class="sub voice-hint">목소리를 선택한 뒤 시작 버튼을 누르면 마이크를 사용합니다. 목소리를 바꾸려면 대화를 중지한 뒤 다시 시작하세요.</p>
+<div id="voice-error" role="alert" hidden></div>
+<div id="voice-audio"></div>
+<details class="voice-debug"><summary>음성 처리 확인</summary><dl><dt>실시간 음성 인식</dt><dd id="voice-transcript">—</dd><dt>확정 질문</dt><dd id="voice-final">—</dd><dt>챗봇 답변</dt><dd id="voice-answer">—</dd><dt>턴 상태</dt><dd id="voice-turn">대기</dd></dl></details>
+</section>
+<section id="conversation" aria-live="polite"><div class="bubble">안녕하세요. 다독이에요. 오늘 어떤 이야기를 나눠볼까요?</div></section>
+<form id="form"><textarea id="question" aria-label="질문" maxlength="8000" placeholder="예: 최근 7일 수면 기록을 요약해줘" required></textarea><button id="send">보내기</button></form>
+<div class="sub">기록과 전문자료를 구분해 안내합니다. 긴급한 상황에는 119 등 즉각적인 도움을 요청해 주세요.</div></main>
+<script>
+const $ = id => document.getElementById(id);
+let session = null, busy = false, activeChild = $('child').value;
+let voiceLocked = false;
+function updateControls() {
+  for (const id of ['send', 'child', 'new', 'question']) $(id).disabled = busy || voiceLocked;
+  $('voice-start').disabled = busy || voiceLocked;
+}
+window.dadokChat = {
+  getSession: () => session, setSession: value => { session = value; },
+  getChild: () => activeChild, isBusy: () => busy,
+  setVoiceLocked: value => { voiceLocked = value; updateControls(); },
+  addMessage: (text, kind) => bubble(text, kind),
+};
+function displayDates(text) {
+  return text.replace(/\b(\d{4})(?:\s*년\s*|[-/.]\s*)(\d{1,2})(?:\s*월\s*|[-/.]\s*)(\d{1,2})(?:일)?(?!\d)/g,
+    (original, year, month, day) => {
+      const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+      if (date.getUTCFullYear() !== Number(year) || date.getUTCMonth() + 1 !== Number(month) || date.getUTCDate() !== Number(day)) return original;
+      return `${Number(month)}월 ${Number(day)}일`;
+    });
+}
+function bubble(text, kind = '') {
+  const el = document.createElement('div');
+  el.className = 'bubble ' + kind;
+  el.textContent = text;
+  $('conversation').append(el);
+  return el;
+}
+// Two frames allow the changed text to paint before recording its display time.
+const afterPaint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+async function close() {
+  if (session) await fetch('/api/session/close', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: session, child_id: activeChild})
+  });
+  session = null;
+}
+$('new').onclick = async () => {
+  if (busy || voiceLocked) return;
+  busy = true; updateControls();
+  try { await close(); $('conversation').replaceChildren(); bubble('새 대화를 시작했어요.'); }
+  finally { busy = false; updateControls(); }
+};
+$('child').onchange = async () => {
+  if (busy || voiceLocked) { $('child').value = activeChild; return; }
+  busy = true; updateControls();
+  try {
+    await close(); activeChild = $('child').value;
+    $('conversation').replaceChildren(); bubble('선택한 아이로 새 대화를 시작했어요.');
+  } finally { busy = false; updateControls(); }
+};
+async function readEvents(response, consume) {
+  if (!response.body) throw Error('스트리밍 응답을 읽을 수 없습니다.');
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let buffer = '';
+  function frame(raw) {
+    let event = 'message'; const data = [];
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+    }
+    if (data.length) consume(event, JSON.parse(data.join('\n')));
+  }
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, {stream: true});
+      let boundary;
+      while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
+        frame(buffer.slice(0, boundary.index));
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+      }
+      if (done) {
+        if (buffer.trim()) frame(buffer);
+        break;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+$('form').onsubmit = async e => {
+  e.preventDefault(); if (busy || voiceLocked) return;
+  const q = $('question').value.trim(); if (!q) return;
+  const submitted = performance.now(), child = activeChild;
+  busy = true;
+  updateControls();
+  $('question').value = ''; bubble(q, 'user');
+  const reply = bubble('확인하고 있어요…');
+  let text = '', firstVisibleMs = null, firstPaint = null, result = null;
+  let ended = false, outcome = 'failed', completionMs = null;
+  function display(value) {
+    text = value; reply.textContent = displayDates(value);
+    if (value.trim() && !firstPaint) {
+      firstPaint = afterPaint().then(() => { firstVisibleMs = performance.now() - submitted; });
+    }
+    reply.scrollIntoView({block: 'nearest'});
+  }
+  try {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: q, session_id: session, child_id: child})
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw Error(typeof error.detail === 'string' ? error.detail : '요청을 처리하지 못했어요.');
+    }
+    await readEvents(res, (event, data) => {
+      if (event === 'status') session = data.session_id;
+      if (event === 'delta') display(text + data.text);
+      if (event === 'done') {
+        result = data; session = data.session_id; ended = true;
+        // The completed, safety-normalized answer is authoritative.
+        display(data.answer);
+        outcome = data.metrics?.stream_interrupted ? 'interrupted' : 'completed';
+      }
+      if (event === 'error') {
+        outcome = data.interrupted || text ? 'interrupted' : 'failed';
+        throw Error(data.message || '응답 전송이 중단됐어요.');
+      }
+    });
+    if (!ended) throw Error('응답이 완료되기 전에 연결이 끊겼어요.');
+    await afterPaint();
+    completionMs = performance.now() - submitted;
+  } catch (err) {
+    outcome = text ? 'interrupted' : 'failed';
+    reply.textContent = text ? displayDates(text) + '\n\n[답변 미완료] ' + err.message : '답변을 받지 못했어요. ' + err.message;
+    await afterPaint();
+    completionMs = performance.now() - submitted;
+  } finally {
+    if (firstPaint) await firstPaint;
+    completionMs = Math.max(completionMs ?? performance.now() - submitted, firstVisibleMs ?? 0);
+    const timing = {
+      session_id: session, child_id: child, request_id: result?.metrics?.request_id ?? null,
+      first_visible_ms: firstVisibleMs, completion_ms: completionMs, status: outcome
+    };
+    window.dadokLastTiming = timing;
+    const meta = document.createElement('div'); meta.className = 'meta';
+    const first = firstVisibleMs === null ? '답변 표시 없음' : `첫 답변 ${(firstVisibleMs / 1000).toFixed(2)}초`;
+    meta.textContent = `${first} · ${outcome === 'completed' ? '완료' : '중단'} ${(completionMs / 1000).toFixed(2)}초`;
+    if (result) meta.textContent += ` · ${result.retrieval.retrieval_mode} · ${result.safety.safety_action}`;
+    reply.append(meta);
+    if (session) fetch('/api/client-timing', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(timing), keepalive: true
+    }).catch(() => {});
+    busy = false;
+    updateControls();
+    $('question').focus(); reply.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+};
+$('question').onkeydown = e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {e.preventDefault(); $('form').requestSubmit();}
+};
+fetch('/health').then(r => r.json()).then(d => {
+  if (d.default_child_id && !session && !busy && !voiceLocked) {activeChild = d.default_child_id; $('child').value = activeChild;}
+  $('status').textContent = d.records_mode === 'snapshot'
+    ? '로컬 기록 스냅샷을 사용합니다.'
+    : d.records_mode === 'unavailable'
+      ? '전문자료 연결 · 육아기록은 서버 인증 설정 후 조회할 수 있습니다.'
+      : '전문자료 및 기록 서버 연결 모드';
+}).catch(() => {$('status').textContent = '서버에 연결하지 못했어요.';});
+</script>
+<script src="/voice-assets/livekit-client.umd.js"></script>
+<script src="/voice-assets/voice.js"></script></html>

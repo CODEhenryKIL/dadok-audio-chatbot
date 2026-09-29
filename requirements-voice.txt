@@ -1,0 +1,5 @@
+-r dadok_chatbot/requirements.txt
+livekit-agents==1.8.2
+livekit-plugins-elevenlabs==1.8.2
+livekit-plugins-silero==1.8.2
+livekit-api==1.2.1

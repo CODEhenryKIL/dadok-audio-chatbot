@@ -1,0 +1,8 @@
+{
+  "name": "dadok-voice-mvp",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "livekit-client": "2.22.3"
+  }
+}
